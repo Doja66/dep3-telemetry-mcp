@@ -68,9 +68,11 @@ Everything is raw chain data: no estimates, no aggregation, no model in the path
 
 ## Install
 
-Nothing to install. Clone, then check the connection:
+Nothing to install. Clone it, then check the connection:
 
 ```sh
+git clone https://github.com/Doja66/dep3-telemetry-mcp.git
+cd dep3-telemetry-mcp
 python3 dep3_mcp_server.py --demo
 ```
 

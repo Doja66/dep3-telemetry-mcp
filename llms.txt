@@ -19,8 +19,8 @@ Health: https://x402-dep3-edge.702digital66.workers.dev/health
 ## Install as an MCP server
 
 ```sh
-git clone <this repo>
-claude mcp add dep3-telemetry -- python3 "$(pwd)/dep3_mcp_server.py"
+git clone https://github.com/Doja66/dep3-telemetry-mcp.git
+claude mcp add dep3-telemetry -- python3 "$(pwd)/dep3-telemetry-mcp/dep3_mcp_server.py"
 ```
 
 Tools: `get_telemetry` (0.005 USD per call), `get_payment_options` (free),
