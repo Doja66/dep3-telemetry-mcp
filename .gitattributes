@@ -1,0 +1,4 @@
+# Normalise line endings so a Windows checkout and a Linux checkout produce the
+# same bytes. Python and JSON here are pure text.
+* text=auto eol=lf
+*.png binary
