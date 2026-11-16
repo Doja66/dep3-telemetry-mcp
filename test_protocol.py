@@ -19,12 +19,14 @@ server = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(server)
 
 AGENT_CARD = {
-    "name": "Department 3 Base telemetry",
+    "name": "Department 3 Base DeFi intelligence",
     "base_url": "https://example.test",
     "resources": [
         {
             "url": "https://example.test/telemetry",
+            "path": "/telemetry",
             "method": "GET",
+            "summary": "Base mainnet block and WETH/USDC pool snapshot",
             "price_usd": 0.005,
             "amount_units": "5000",
             "network": "eip155:8453",
@@ -32,14 +34,41 @@ AGENT_CARD = {
             "asset_contract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
             "pay_to": "0x07Efb263C7218F82aD1e7304eB93bb1b3e7C104b",
             "rails": ["x402_base_usdc", "stripe_prepaid_credit"],
-            "credit_pack": {
-                "price_usd": 50,
-                "calls": 10000,
-                "checkout": "https://buy.stripe.com/test",
-                "claim": "https://example.test/credits/claim?session_id=<id>",
-            },
-        }
+        },
+        {
+            "url": "https://example.test/whale-flow",
+            "path": "/whale-flow",
+            "method": "GET",
+            "summary": "USDC transfers of 25,000 USD or more, decoded",
+            "price_usd": 0.01,
+            "amount_units": "10000",
+            "network": "eip155:8453",
+            "asset": "USDC",
+            "asset_contract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "pay_to": "0x07Efb263C7218F82aD1e7304eB93bb1b3e7C104b",
+            "rails": ["x402_base_usdc", "stripe_prepaid_credit"],
+        },
+        {
+            "url": "https://example.test/arb-spreads",
+            "path": "/arb-spreads",
+            "method": "GET",
+            "summary": "Cross-DEX WETH/USDC spreads after fees and gas",
+            "price_usd": 0.015,
+            "amount_units": "15000",
+            "network": "eip155:8453",
+            "asset": "USDC",
+            "asset_contract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "pay_to": "0x07Efb263C7218F82aD1e7304eB93bb1b3e7C104b",
+            "rails": ["x402_base_usdc", "stripe_prepaid_credit"],
+        },
     ],
+    "credit_pack": {
+        "price_usd": 50,
+        "credit_micro_usd": 50000000,
+        "checkout": "https://buy.stripe.com/test",
+        "claim": "https://example.test/credits/claim?session_id=<id>",
+        "calls_by_route": {"/telemetry": 10000, "/whale-flow": 5000, "/arb-spreads": 3333},
+    },
     "discovery": ["https://example.test/llms.txt"],
 }
 
@@ -73,7 +102,13 @@ class ProtocolTests(unittest.TestCase):
     def test_tools_list_describes_every_tool(self):
         tools = call("tools/list")["result"]["tools"]
         names = {tool["name"] for tool in tools}
-        assert names == {"get_telemetry", "get_payment_options", "get_balance"}
+        assert names == {
+            "get_base_telemetry",
+            "get_base_whale_flow",
+            "get_base_arb_spreads",
+            "get_payment_options",
+            "get_balance",
+        }
         for tool in tools:
             assert tool["inputSchema"]["type"] == "object"
             assert tool["description"]
@@ -151,8 +186,17 @@ class PaymentAndBalanceTests(unittest.TestCase):
         with mock.patch.object(server, "http_get", side_effect=fake):
             reply = call("tools/call", {"name": "get_payment_options", "arguments": {}})
         options = json.loads(reply["result"]["content"][0]["text"])
-        assert options["challenge_header_value"] == CHALLENGE
+        assert [offer["path"] for offer in options["offers"]] == [
+            "/telemetry",
+            "/whale-flow",
+            "/arb-spreads",
+        ]
+        assert options["offers"][0]["tool"] == "get_base_telemetry"
+        assert options["offers"][1]["tool"] == "get_base_whale_flow"
+        assert options["offers"][2]["tool"] == "get_base_arb_spreads"
+        assert options["offers"][0]["challenge_header_value"] == CHALLENGE
         assert options["card_rail"]["checkout"] == "https://buy.stripe.com/test"
+        assert options["card_rail"]["calls_by_route"]["/arb-spreads"] == 3333
         assert options["pay_to"].startswith("0x07Ef")
 
     def test_balance_without_a_key_explains_what_is_missing(self):
@@ -171,3 +215,38 @@ class PaymentAndBalanceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_each_paid_tool_calls_its_own_path(self):
+        seen: list[str] = []
+
+        def fake(path, headers):
+            seen.append(path)
+            return 200, {}, "{}"
+
+        with mock.patch.object(server, "http_get", side_effect=fake):
+            for name in ("get_base_telemetry", "get_base_whale_flow", "get_base_arb_spreads"):
+                reply = call("tools/call", {"name": name, "arguments": {}})
+                assert reply["result"]["isError"] is False
+        assert seen == ["/telemetry", "/whale-flow", "/arb-spreads"]
+
+    def test_the_v1_tool_name_still_works(self):
+        with mock.patch.object(server, "http_get", return_value=(200, {}, '{"status":"ok"}')):
+            reply = call("tools/call", {"name": "get_telemetry", "arguments": {}})
+        assert reply["result"]["isError"] is False
+
+    def test_query_filters_reach_the_url(self):
+        seen: list[str] = []
+
+        def fake(path, headers):
+            seen.append(path)
+            return 200, {}, "{}"
+
+        with mock.patch.object(server, "http_get", side_effect=fake):
+            call("tools/call", {"name": "get_base_whale_flow", "arguments": {"min_usd": 250000}})
+            call("tools/call", {"name": "get_base_arb_spreads", "arguments": {"min_net_bps": 5}})
+            call("tools/call", {"name": "get_base_telemetry", "arguments": {"fields": "block"}})
+        assert seen == [
+            "/whale-flow?min_usd=250000",
+            "/arb-spreads?min_net_bps=5",
+            "/telemetry?fields=block",
+        ]

@@ -1,10 +1,15 @@
-# Department 3 — Base telemetry as an MCP server
+# Department 3 — Base DeFi intelligence as an MCP server
 
-One JSON resource: a Base mainnet block and DEX pool snapshot, refreshed every
-15 seconds, sold per call for **0.005 USDC** over [x402](https://x402.org) on
-Base, or **$50 for 10,000 calls** by card.
+Three JSON feeds from Base mainnet, sold per call over
+[x402](https://x402.org), or from a **$50 prepaid credit pack** by card:
 
-This repo is a drop-in MCP client for that feed. It is a single Python file with
+| Feed | Price |
+| --- | --- |
+| Base block + three WETH/USDC pools | **0.005 USDC** |
+| USDC transfers of 25,000 USD or more | **0.010 USDC** |
+| Cross-DEX spreads after fees and gas | **0.015 USDC** |
+
+This repo is a drop-in MCP client for all three. It is a single Python file with
 no dependencies, so it runs on whatever `python3` you already have.
 
 ```text
@@ -13,7 +18,9 @@ https://x402-dep3-edge.702digital66.workers.dev
 
 ## What you get back
 
-One JSON envelope: the feed, the settlement receipt, and the ledger record.
+One JSON envelope: the feed, the settlement receipt, and the ledger record. Each
+route returns only its own dataset — a 0.005 call never contains the arbitrage
+or whale data.
 
 ```json
 {
@@ -146,9 +153,14 @@ debit is refunded automatically, so a failed call is not a lost call. Pass
 
 | Tool | Cost | What it does |
 | --- | --- | --- |
-| `get_telemetry` | 0.005 USD | The block + pool snapshot. |
-| `get_payment_options` | free | Price, pay-to address, network, asset, 402 challenge, checkout link. |
+| `get_base_telemetry` | 0.005 USD | Block + three WETH/USDC pools. Takes `fields`. |
+| `get_base_whale_flow` | 0.010 USD | USDC transfers ≥ 25,000 USD. Takes `min_usd`. |
+| `get_base_arb_spreads` | 0.015 USD | Spreads after both fees and gas. Takes `min_net_bps`. |
+| `get_payment_options` | free | Prices, pay-to address, network, 402 challenges, checkout link. |
 | `get_balance` | free | Remaining credit and calls for the configured key. |
+
+`get_telemetry` is still accepted as an alias for `get_base_telemetry`, so an
+older config keeps working, but it is not advertised in `tools/list`.
 
 ## Configuration
 

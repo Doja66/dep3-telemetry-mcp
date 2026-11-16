@@ -9,9 +9,11 @@ Standard library only, by design: a developer should be able to copy this file
 next to their client config and run it with whatever `python` they already have.
 
 Tools
-  get_telemetry      the paid resource (0.005 USDC per call, two payment rails)
-  get_payment_options price, address, network and the card checkout link
-  get_balance        remaining prepaid credit for the configured key
+  get_base_telemetry   Base block + three WETH/USDC pools   (0.005 USDC per call)
+  get_base_whale_flow  USDC transfers of 25k USD or more    (0.010 USDC per call)
+  get_base_arb_spreads cross-DEX spreads after fees and gas (0.015 USDC per call)
+  get_payment_options  prices, address, network, checkout link (free)
+  get_balance          remaining prepaid credit             (free)
 
 Configuration (environment)
   DEP3_BASE_URL    override the service host (default: the live Worker)
@@ -29,53 +31,95 @@ import urllib.request
 from typing import Any
 
 SERVER_NAME = "dep3-telemetry"
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "2.0.0"
 DEFAULT_BASE_URL = "https://x402-dep3-edge.702digital66.workers.dev"
 SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 FALLBACK_PROTOCOL = "2024-11-05"
 HTTP_TIMEOUT_SECONDS = 45.0
 
 INSTRUCTIONS = (
-    "Department 3 sells one JSON resource: a Base mainnet block and DEX snapshot, "
-    "refreshed every 15 seconds. Each call costs 0.005 USDC and settles on Base, "
-    "either per call over x402 or against a prepaid credit pack bought by card. "
-    "Call get_payment_options first if you are unsure how to pay."
+    "Department 3 sells three JSON feeds from Base mainnet: block and pool telemetry "
+    "(0.005 USD), USDC whale flow (0.010 USD) and cross-DEX arbitrage spreads (0.015 USD). "
+    "Each call settles on Base, either per call over x402 or against prepaid credit bought "
+    "by card. Call get_payment_options first if you are unsure how to pay."
 )
 
-TOOLS: list[dict[str, Any]] = [
-    {
-        "name": "get_telemetry",
-        "description": (
-            "Fetch the latest Base mainnet block and DEX pool snapshot. Costs 0.005 USDC per "
-            "call. A standard x402 client pays with PAYMENT-SIGNATURE (EIP-3009); a manual "
-            "buyer pays with a transfer hash, or with a prepaid credit key. Without any of "
-            "them, returns the HTTP 402 challenge and how to satisfy it."
-        ),
+#: Shared by every paid tool: the same three ways to pay, the same envelope back.
+PAID_PROPERTIES: dict[str, Any] = {
+    "credit_key": {
+        "type": "string",
+        "description": "Prepaid credit key (ck_...). Defaults to DEP3_CREDIT_KEY.",
+    },
+    "receipt": {
+        "type": "string",
+        "description": "Base transaction hash that paid this call's price. "
+        "Defaults to DEP3_RECEIPT.",
+    },
+    "idempotency_key": {
+        "type": "string",
+        "description": "Send the same value on a retry so the call is not charged twice.",
+    },
+}
+
+
+def paid_tool(
+    name: str,
+    description: str,
+    properties: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "description": description,
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "credit_key": {
-                    "type": "string",
-                    "description": "Prepaid credit key (ck_...). Defaults to DEP3_CREDIT_KEY.",
-                },
-                "receipt": {
-                    "type": "string",
-                    "description": "Base transaction hash of a 0.005 USDC transfer. "
-                    "Defaults to DEP3_RECEIPT.",
-                },
-                "idempotency_key": {
-                    "type": "string",
-                    "description": "Send the same value on a retry so the call is not "
-                    "charged twice.",
-                },
-            },
+            "properties": {**PAID_PROPERTIES, **(properties or {})},
             "additionalProperties": False,
         },
-    },
+    }
+
+
+TOOLS: list[dict[str, Any]] = [
+    paid_tool(
+        "get_base_telemetry",
+        "Latest Base mainnet block and three WETH/USDC pools. Costs 0.005 USD per call. "
+        "A standard x402 client pays with PAYMENT-SIGNATURE (EIP-3009); a manual buyer pays "
+        "with a transfer hash, or with a prepaid credit key.",
+        {
+            "fields": {
+                "type": "string",
+                "description": "Comma-separated keys to return, e.g. block,pools.",
+            }
+        },
+    ),
+    paid_tool(
+        "get_base_whale_flow",
+        "USDC transfers of 25,000 USD or more on Base, decoded to sender, recipient and "
+        "amount. Costs 0.010 USD per call.",
+        {
+            "min_usd": {
+                "type": "number",
+                "description": "Only return transfers at least this large. The feed starts "
+                "at 25,000, so this can only raise the floor.",
+            }
+        },
+    ),
+    paid_tool(
+        "get_base_arb_spreads",
+        "WETH/USDC price spreads across two Uniswap v3 fee tiers and Aerodrome Slipstream, "
+        "with both swap fees and gas subtracted, plus the buy/sell direction. Costs 0.015 USD "
+        "per call.",
+        {
+            "min_net_bps": {
+                "type": "number",
+                "description": "Only return opportunities whose net spread is at least this "
+                "many basis points.",
+            }
+        },
+    ),
     {
         "name": "get_payment_options",
         "description": (
-            "Return the live price, pay-to address, network, asset, the 402 challenge header, "
+            "Return the live prices, pay-to address, network, asset, the 402 challenge header, "
             "and the Stripe checkout link for the $50 credit pack. Free: costs nothing."
         ),
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -156,10 +200,12 @@ def text_result(body: str, is_error: bool = False) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": body}], "isError": is_error}
 
 
-def payment_required_text(status: int, headers: Any, body: str) -> str:
+def payment_required_text(
+    status: int, headers: Any, body: str, path: str = "/telemetry", price_usd: str = "0.005"
+) -> str:
     challenge = _header(headers, "x-x402-payment-required")
     lines = [
-        f"Payment required (HTTP {status}).",
+        f"Payment required (HTTP {status}) for {path} at {price_usd} USD.",
         f"Challenge: {challenge or '(no challenge header returned)'}",
         "",
         "Two rails, pick one:",
@@ -169,27 +215,51 @@ def payment_required_text(status: int, headers: Any, body: str) -> str:
         "  2. Card: buy the credit pack, then set DEP3_CREDIT_KEY to the key Stripe shows",
         "     you after payment.",
         "",
-        "Run get_payment_options for the live price, address and checkout link.",
+        "Run get_payment_options for the live prices, address and checkout link.",
     ]
     if body.strip():
         lines += ["", "Server response:", body.strip()]
     return "\n".join(lines)
 
 
-def tool_get_telemetry(args: dict[str, Any]) -> dict[str, Any]:
+def paid_request(
+    path: str,
+    price_usd: str,
+    args: dict[str, Any],
+    query: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """One paid GET: build the credential headers, call, and explain a 402."""
     headers = auth_headers(
         credit_key=args.get("credit_key"),
         receipt=args.get("receipt"),
         idempotency_key=args.get("idempotency_key"),
     )
-    status, response_headers, body = http_get("/telemetry", headers)
+    suffix = ""
+    for key, value in (query or {}).items():
+        if value is None or value == "":
+            continue
+        suffix += ("&" if suffix else "?") + f"{key}={value}"
+    status, response_headers, body = http_get(path + suffix, headers)
     if status == 200:
         return text_result(body)
     if status == 402:
-        return text_result(payment_required_text(status, response_headers, body), is_error=True)
-    return text_result(
-        f"Telemetry call failed: HTTP {status}.\n{body.strip()}".strip(), is_error=True
-    )
+        return text_result(
+            payment_required_text(status, response_headers, body, path, price_usd),
+            is_error=True,
+        )
+    return text_result(f"{path} failed: HTTP {status}.\n{body.strip()}".strip(), is_error=True)
+
+
+def tool_get_base_telemetry(args: dict[str, Any]) -> dict[str, Any]:
+    return paid_request("/telemetry", "0.005", args, {"fields": args.get("fields")})
+
+
+def tool_get_base_whale_flow(args: dict[str, Any]) -> dict[str, Any]:
+    return paid_request("/whale-flow", "0.010", args, {"min_usd": args.get("min_usd")})
+
+
+def tool_get_base_arb_spreads(args: dict[str, Any]) -> dict[str, Any]:
+    return paid_request("/arb-spreads", "0.015", args, {"min_net_bps": args.get("min_net_bps")})
 
 
 def tool_get_payment_options(_args: dict[str, Any]) -> dict[str, Any]:
@@ -202,37 +272,54 @@ def tool_get_payment_options(_args: dict[str, Any]) -> dict[str, Any]:
     except json.JSONDecodeError:
         return text_result("The discovery file was not valid JSON.", is_error=True)
 
-    resources = card.get("resources") or [{}]
-    resource = resources[0] if isinstance(resources[0], dict) else {}
-    pack = resource.get("credit_pack") or {}
+    resources = [item for item in (card.get("resources") or []) if isinstance(item, dict)]
+    pack = card.get("credit_pack") or {}
+    offers = []
+    for resource in resources:
+        path = str(resource.get("path") or "/telemetry")
+        # The challenge header on the real resource is the authoritative value;
+        # the card is documentation, this is what a client must actually send.
+        probe_status, probe_headers, _ = http_get(path, {})
+        challenge = (
+            _header(probe_headers, "x-x402-payment-required") if probe_status == 402 else ""
+        )
+        offers.append(
+            {
+                "tool": {
+                    "/telemetry": "get_base_telemetry",
+                    "/whale-flow": "get_base_whale_flow",
+                    "/arb-spreads": "get_base_arb_spreads",
+                }.get(path, path),
+                "path": path,
+                "price_usd": resource.get("price_usd"),
+                "amount_units": resource.get("amount_units"),
+                "summary": resource.get("summary"),
+                "challenge_header_value": challenge,
+            }
+        )
 
-    # The challenge header on the real resource is the authoritative value;
-    # the card is documentation, this is what a client must actually send.
-    probe_status, probe_headers, _ = http_get("/telemetry", {})
-    challenge = _header(probe_headers, "x-x402-payment-required") if probe_status == 402 else ""
-
+    first = resources[0] if resources else {}
     options = {
         "service": card.get("name"),
         "base_url": card.get("base_url") or base_url(),
-        "endpoint": resource.get("url") or f"{base_url()}/telemetry",
-        "method": resource.get("method", "GET"),
-        "price_usd": resource.get("price_usd"),
-        "amount_units": resource.get("amount_units"),
-        "network": resource.get("network"),
-        "asset": resource.get("asset"),
-        "asset_contract": resource.get("asset_contract"),
-        "pay_to": resource.get("pay_to"),
-        "challenge_header_value": challenge,
-        "rails": resource.get("rails", []),
+        "network": first.get("network"),
+        "asset": first.get("asset"),
+        "asset_contract": first.get("asset_contract"),
+        "pay_to": first.get("pay_to"),
+        "rails": first.get("rails", []),
+        "offers": offers,
         "crypto_rail": {
-            "send": f"{resource.get('amount_units')} units of {resource.get('asset')} on "
-                    f"{resource.get('network')} to {resource.get('pay_to')}",
+            "how": f"Sign an EIP-3009 transferWithAuthorization for the route's amount, "
+                   f"send PAYMENT-SIGNATURE. Manual: send the USDC on "
+                   f"{first.get('network')} to {first.get('pay_to')} and retry with "
+                   f"X-x402-Payment-Receipt: <tx_hash>.",
             "then_retry_with_header": "X-x402-Payment-Receipt: <tx_hash>",
         },
         "card_rail": {
             "checkout": pack.get("checkout"),
             "price_usd": pack.get("price_usd"),
-            "calls": pack.get("calls"),
+            "credit_micro_usd": pack.get("credit_micro_usd"),
+            "calls_by_route": pack.get("calls_by_route"),
             "claim": pack.get("claim"),
             "then_set_env": "DEP3_CREDIT_KEY=<credit_key>",
         },
@@ -258,9 +345,14 @@ def tool_get_balance(args: dict[str, Any]) -> dict[str, Any]:
 
 
 HANDLERS = {
-    "get_telemetry": tool_get_telemetry,
+    "get_base_telemetry": tool_get_base_telemetry,
+    "get_base_whale_flow": tool_get_base_whale_flow,
+    "get_base_arb_spreads": tool_get_base_arb_spreads,
     "get_payment_options": tool_get_payment_options,
     "get_balance": tool_get_balance,
+    # The v1 name, kept so an existing client config keeps working. It is not
+    # advertised in tools/list.
+    "get_telemetry": tool_get_base_telemetry,
 }
 
 
