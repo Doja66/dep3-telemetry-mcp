@@ -1,0 +1,16 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "dep3-telemetry": {
+        "type": "local",
+        "command": ["python3", "/absolute/path/to/dep3_mcp_server.py"],
+        "environment": {
+          "DEP3_BASE_URL": "https://x402-dep3-edge.702digital66.workers.dev",
+          "DEP3_CREDIT_KEY": "{env:DEP3_CREDIT_KEY}",
+          "DEP3_RECEIPT": "{env:DEP3_RECEIPT}"
+        }
+      }
+    }
+  }
+}

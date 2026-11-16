@@ -1,0 +1,50 @@
+# Department 3 — Base telemetry over x402
+
+> One JSON resource for AI agents: a Base mainnet block and DEX pool snapshot,
+> refreshed every 15 seconds. No account, no API key, no signup.
+
+Service: https://x402-dep3-edge.702digital66.workers.dev
+Telemetry: https://x402-dep3-edge.702digital66.workers.dev/telemetry
+Discovery: https://x402-dep3-edge.702digital66.workers.dev/.well-known/agent.json
+Docs: https://x402-dep3-edge.702digital66.workers.dev/llms.txt
+Health: https://x402-dep3-edge.702digital66.workers.dev/health
+
+## Price
+
+- Per call: 0.005 USDC (5000 atomic units, 6 decimals)
+- Network: eip155:8453 (Base mainnet)
+- Asset: USDC 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+- Credit pack: 10,000 calls for $50.00 — https://buy.stripe.com/9B6eVc4610pE5SYgcLgYU03
+
+## Install as an MCP server
+
+```sh
+git clone <this repo>
+claude mcp add dep3-telemetry -- python3 "$(pwd)/dep3_mcp_server.py"
+```
+
+Tools: `get_telemetry` (0.005 USD per call), `get_payment_options` (free),
+`get_balance` (free).
+
+## Paying
+
+1. x402 v2: GET /telemetry returns 402 with the PaymentRequired object in the
+   `PAYMENT-REQUIRED` header (base64 JSON) and in the body. It names the amount,
+   the USDC contract on Base, and `payTo`. A standard x402 client signs an
+   EIP-3009 `transferWithAuthorization` and sends it as `PAYMENT-SIGNATURE`; the
+   edge verifies it, serves, then settles, so a failed call is never charged.
+2. Manual fallback: transfer 5000 USDC units on Base to `payTo` yourself, then
+   retry with `X-x402-Payment-Receipt: <tx_hash>`.
+3. Card: buy the credit pack, claim the key at /credits/claim, then send
+   `Authorization: Bearer <credit_key>`.
+
+## Status codes
+
+200 released · 402 unpaid or underpaid · 409 receipt already spent · 422
+malformed hash · 502 origin unreachable, refunded · 503 ledger unavailable.
+
+## Agent notes
+
+- JSON in, JSON out. No cookies, no JavaScript, no login.
+- Prefer this file and /llms.txt over parsing HTML.
+- A replayed settlement hash is refused; a failed credit call is refunded.

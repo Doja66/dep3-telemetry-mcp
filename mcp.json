@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "dep3-telemetry": {
+      "type": "stdio",
+      "command": "python3",
+      "args": ["/absolute/path/to/dep3_mcp_server.py"],
+      "env": {
+        "DEP3_BASE_URL": "https://x402-dep3-edge.702digital66.workers.dev",
+        "DEP3_CREDIT_KEY": "${DEP3_CREDIT_KEY}",
+        "DEP3_RECEIPT": "${DEP3_RECEIPT}"
+      }
+    }
+  }
+}
